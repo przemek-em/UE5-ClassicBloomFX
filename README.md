@@ -28,7 +28,7 @@ A custom bloom post-process plugin for **Unreal Engine 5.6+** that provides clas
 
 ## Quick Start
 
-Disable default Unreal Bloom in Project > Engine - Rendering > Bloom, or place PostProcessVolume with Bloom Intensity set to 0, then:
+Disable default Unreal Bloom in Project → Engine - Rendering → Bloom, or place PostProcessVolume with Bloom Intensity set to 0, then:
 1. Place a **BloomFX Component** on any actor in your level (i recommend using just simple blueprint with component enabled)
 2. Adjust **Bloom Mode** and **Bloom Intensity** in the Details panel
 3. The effect applies automatically to the viewport
@@ -79,5 +79,11 @@ MIT License – See [LICENSE](LICENSE) for details.
 
 ### Screenshots
 ![Image](images/screen_1.png)
+![Image](images/screen4.png)
+![Image](images/screen5.png)
+![Image](images/screen6.png)
+![Image](images/screen7.png)
+![Image](images/screen8.png)
+![Image](images/meadow2.png)
 ![Image](images/screen_2.png)
 ![Image](images/screen_3.png)
