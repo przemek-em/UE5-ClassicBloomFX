@@ -1,0 +1,274 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ScreenPass.ush"
+
+// Composite bloom back onto scene color
+
+// Parameters are bound from C++ SHADER_PARAMETER_STRUCT
+Texture2D SceneColorTexture;
+SamplerState SceneColorSampler;
+Texture2D BloomTexture;
+SamplerState BloomSampler;
+float4 OutputViewportSizeAndInvSize;
+FScreenTransform SvPositionToSceneColorUV; // Transform from SvPosition to scene color texture UV
+FScreenTransform SvPositionToBloomUV;      // Transform from SvPosition to bloom texture UV
+float BloomIntensity;
+float4 BloomTint;
+float BloomBlendMode; // 0=Screen, 1=Overlay, 2=SoftLight, 3=HardLight, 4=Lighten, 5=Multiply
+float BloomSaturation; // Saturation multiplier for bloom colors
+float bProtectHighlights; // 1.0 = enabled, 0.0 = disabled
+float HighlightProtection; // Strength of highlight protection (0.0-1.0)
+float SoftFocusIntensity;
+float4 SoftFocusParams; // x=OverlayMult, y=BlendStrength, z=SoftLightMult, w=FinalBlend
+float bUseAdaptiveScaling; // 1.0 = enabled, 0.0 = disabled
+float bShowBloomOnly; // Debug: show only bloom buffer
+float bShowGammaCompensation; // Debug: visualize gamma compensation
+float bIsGameWorld; // 1.0 if game/PIE world, 0.0 if editor
+float GameModeBloomScale; // Manual compensation for game mode
+
+// Adjust saturation of a color
+// Saturation = 1.0: no change, >1.0 = more saturated, <1.0 = desaturated
+float3 AdjustSaturation(float3 Color, float Saturation)
+{
+	// Calculate luminance (grayscale value)
+	float Luminance = dot(Color, float3(0.299, 0.587, 0.114));
+	
+	// Lerp between grayscale and original color based on saturation
+	// Saturation 0.0 = full grayscale, 1.0 = original, 2.0 = double saturation
+	return lerp(Luminance.xxx, Color, Saturation);
+}
+
+// Protect highlights from over-brightening (prevents washing out to white)
+// Uses soft-clipping to preserve color while limiting brightness
+float3 ProtectHighlights(float3 Color, float Protection)
+{
+	if (Protection <= 0.0)
+		return Color;
+	
+	// Calculate luminance
+	float Luma = dot(Color, float3(0.299, 0.587, 0.114));
+	
+	// Soft-clip highlights using a smooth curve
+	// Protection 0.0 = no effect, 1.0 = maximum protection
+	float Threshold = lerp(2.0, 0.8, Protection); // Lower threshold = more protection
+	float SoftClip = Threshold + (1.0 - Threshold) * tanh((Luma - Threshold) / (1.0 - Threshold));
+	
+	// Apply soft-clip while preserving color ratios
+	float Scale = (Luma > 0.001) ? (SoftClip / Luma) : 1.0;
+	return Color * saturate(Scale);
+}
+
+// Apply blend mode to bloom effect
+// Base = Scene color, Blend = Bloom effect
+float3 ApplyBloomBlendMode(float3 Base, float3 Blend, float Mode)
+{
+	// Mode 0: Screen blend - Photographic glow (recommended)
+	// Formula: 1 - (1-A)*(1-B) = A + B - A*B
+	if (Mode < 0.5)
+	{
+		return Base + Blend - Base * Blend;
+	}
+	
+	// Mode 1: Overlay blend - High contrast glow
+	// Formula: Base < 0.5 ? (2*Base*Blend) : (1 - 2*(1-Base)*(1-Blend))
+	if (Mode < 1.5)
+	{
+		return lerp(
+			2.0 * Base * Blend,
+			1.0 - 2.0 * (1.0 - Base) * (1.0 - Blend),
+			step(0.5, Base)
+		);
+	}
+	
+	// Mode 2: Soft light blend - Gentle, subtle glow
+	// Formula: Blend < 0.5 ? (2*Base*Blend + Base²*(1-2*Blend)) : (sqrt(Base)*(2*Blend-1) + 2*Base*(1-Blend))
+	if (Mode < 2.5)
+	{
+		return lerp(
+			2.0 * Base * Blend + Base * Base * (1.0 - 2.0 * Blend),
+			sqrt(Base) * (2.0 * Blend - 1.0) + 2.0 * Base * (1.0 - Blend),
+			step(0.5, Blend)
+		);
+	}
+	
+	// Mode 3: Hard light blend - Intense, punchy glow
+	// Formula: Blend < 0.5 ? (2*Base*Blend) : (1 - 2*(1-Base)*(1-Blend))
+	if (Mode < 3.5)
+	{
+		return lerp(
+			2.0 * Base * Blend,
+			1.0 - 2.0 * (1.0 - Base) * (1.0 - Blend),
+			step(0.5, Blend)
+		);
+	}
+	
+	// Mode 4: Lighten blend - Only brightens, never darkens
+	// Formula: max(Base, Blend)
+	if (Mode < 4.5)
+	{
+		return max(Base, Blend);
+	}
+	
+	// Mode 5: Multiply blend - Darkens scene with bloom
+	// Formula: Base * Blend
+	return Base * Blend;
+}
+
+void CompositeBloomPS(
+	float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	// Use FScreenTransform to properly map SvPosition to texture UVs
+	// This handles all viewport offset and texture extent calculations correctly
+	float2 SceneColorUV = ApplyScreenTransform(SvPosition.xy, SvPositionToSceneColorUV);
+	float2 BloomUV = ApplyScreenTransform(SvPosition.xy, SvPositionToBloomUV);
+	
+	// Sample textures
+	float3 SceneColor = Texture2DSample(SceneColorTexture, SceneColorSampler, SceneColorUV).rgb;
+	float3 BloomSample = Texture2DSample(BloomTexture, BloomSampler, BloomUV).rgb;
+	
+	// Calculate luminance for adaptive scaling
+	float SceneLuminance = dot(SceneColor, float3(0.299, 0.587, 0.114));
+	
+	// Bloom scaling calculation
+	float BloomScale = 1.0;
+	
+	if (bUseAdaptiveScaling > 0.5)
+	{
+		// Adaptive scaling based on scene brightness
+		float SceneBrightness = SceneLuminance + 0.001;
+		float AdaptiveScale = saturate(1.0 / (1.0 + SceneBrightness * 2.0));
+		BloomScale = lerp(0.7, 1.0, AdaptiveScale);
+	}
+	else if (bIsGameWorld > 0.5)
+	{
+		// In game/PIE mode, apply manual compensation
+		BloomScale = GameModeBloomScale;
+	}
+	// else: Editor mode, use BloomScale = 1.0
+	
+	// Start with scene color
+	float3 Result = SceneColor;
+	
+	// Debug visualizations
+	if (bShowBloomOnly > 0.5)
+	{
+		// Show only the bloom buffer for debugging
+		OutColor.rgb = BloomSample * BloomIntensity * 10.0; // Boosted for visibility
+		OutColor.a = 1.0;
+		return;
+	}
+	
+	if (bShowGammaCompensation > 0.5)
+	{
+		// Visualize the actual scene color values to check for exposure differences
+		// If PIE shows brighter colors here, the scene texture itself has higher values
+		// This would indicate pre-exposure or auto-exposure differences
+		
+		// Show scene color boosted for visibility
+		// If this looks different between editor and PIE, that's the root cause
+		OutColor.rgb = SceneColor * 2.0; // Boost 2x to see differences better
+		OutColor.a = 1.0;
+		return;
+	}
+	
+	// Determine if we have any effects to apply
+	bool bHasBloom = BloomIntensity > 0.0;
+	bool bHasSoftFocus = SoftFocusIntensity > 0.0;
+	
+	if (!bHasBloom && !bHasSoftFocus)
+	{
+		// No effects, return scene color as-is
+		OutColor.rgb = SceneColor;
+		OutColor.a = 1.0;
+		return;
+	}
+	
+	// Apply effects based on what's enabled
+	// Soft focus and bloom are now independent
+	// Note: BloomTint.a encodes bUseSceneColor flag (1.0 = use scene color, 0.0 = use tint)
+	bool bUseSceneColor = BloomTint.a > 0.5;
+	
+	// Unpack soft focus tuning parameters
+	float SoftFocusOverlayMult = SoftFocusParams.x;
+	float SoftFocusBlendStrength = SoftFocusParams.y;
+	float SoftFocusSoftLightMult = SoftFocusParams.z;
+	float SoftFocusFinalBlend = SoftFocusParams.w;
+	
+	if (bHasSoftFocus && bHasBloom)
+	{
+		// Both effects enabled: Apply them separately to avoid coupling
+		
+		// Soft focus: Full-scene subtle glow without raising exposure
+		// Use overlay blending which darkens darks and brightens brights
+		// Formula: Result < 0.5 ? (2*A*B) : (1 - 2*(1-A)*(1-B))
+		float3 SoftGlow = BloomSample * SoftFocusIntensity * SoftFocusOverlayMult * BloomScale;
+		float3 SoftFocusResult = lerp(
+			2.0 * SceneColor * SoftGlow,
+			1.0 - 2.0 * (1.0 - SceneColor) * (1.0 - SoftGlow),
+			step(0.5, SceneColor)
+		);
+		
+		// Blend soft focus with scene based on tunable blend strength
+		Result = lerp(SceneColor, SoftFocusResult, saturate(SoftFocusIntensity * SoftFocusBlendStrength));
+		
+		// Bloom: Highlights only with optional tint
+		float3 BloomColor = bUseSceneColor ? BloomSample : (BloomSample * BloomTint.rgb);
+		// Apply saturation boost to make bloom more vibrant
+		BloomColor = AdjustSaturation(BloomColor, BloomSaturation);
+		// Apply highlight protection if enabled (prevents washing out to white)
+		if (bProtectHighlights > 0.5)
+		{
+			BloomColor = ProtectHighlights(BloomColor, HighlightProtection);
+		}
+		float3 BloomEffect = BloomColor * BloomIntensity * BloomScale;
+		
+		// Apply bloom with selected blend mode on top of soft focus result
+		Result = ApplyBloomBlendMode(Result, BloomEffect, BloomBlendMode);
+	}
+	else if (bHasSoftFocus)
+	{
+		// Soft Focus mode: Full-scene dreamy glow
+		// The key difference from regular bloom is the LOW THRESHOLD (captures full scene)
+		// But we still use the user's selected blend mode for flexibility
+		
+		// Apply tint if needed
+		float3 SoftFocusColor = bUseSceneColor ? BloomSample : (BloomSample * BloomTint.rgb);
+		
+		// Apply saturation boost
+		SoftFocusColor = AdjustSaturation(SoftFocusColor, BloomSaturation);
+		
+		// Apply highlight protection if enabled
+		if (bProtectHighlights > 0.5)
+		{
+			SoftFocusColor = ProtectHighlights(SoftFocusColor, HighlightProtection);
+		}
+		
+		// Create the soft focus effect
+		float3 SoftFocusEffect = SoftFocusColor * SoftFocusIntensity * BloomScale;
+		
+		// Apply with the user's selected blend mode
+		Result = ApplyBloomBlendMode(SceneColor, SoftFocusEffect, BloomBlendMode);
+	}
+	else if (bHasBloom)
+	{
+		// Only bloom: Classic highlight glow
+		float3 BloomColor = bUseSceneColor ? BloomSample : (BloomSample * BloomTint.rgb);
+		// Apply saturation boost to make bloom more vibrant
+		BloomColor = AdjustSaturation(BloomColor, BloomSaturation);
+		// Apply highlight protection if enabled (prevents washing out to white)
+		if (bProtectHighlights > 0.5)
+		{
+			BloomColor = ProtectHighlights(BloomColor, HighlightProtection);
+		}
+		float3 BloomEffect = BloomColor * BloomIntensity * BloomScale;
+		
+		// Apply bloom with selected blend mode
+		Result = ApplyBloomBlendMode(SceneColor, BloomEffect, BloomBlendMode);
+	}
+	
+	OutColor.rgb = Result;
+	OutColor.a = 1.0;
+}

@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "UE5-ClassicBloom",
+	"Description": "Custom post-process bloom effects with old games vibe.",
+	"Category": "Rendering",
+	"CreatedBy": "Przemysław Mielniczenko",
+	"CreatedByURL": "https://www.linkedin.com/in/przemyslaw-mielniczenko/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "ClassicBloomFX",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	]
+}
