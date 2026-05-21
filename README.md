@@ -2,6 +2,8 @@
 
 A custom bloom post-process plugin for **Unreal Engine 5.6+** that provides classic bloom effects.
 
+Check the new plugin which also has this functionality updated, bugs have also been fixed. [ToneMapFX](https://github.com/przemek-em/UE5-ToneMapFX)
+
 ![UE5](https://img.shields.io/badge/Unreal%20Engine-5.6+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)
